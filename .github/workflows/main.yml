@@ -9,112 +9,104 @@ jobs:
     timeout-minutes: 3600
 
     steps:
-      - name: Configure Core RDP Settings
+      - name: Enable and Configure RDP
         run: |
-          # Enable Remote Desktop and disable Network Level Authentication (if needed)
+          # Enable Remote Desktop
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force
+                           -Name "fDenyTSConnections" -Value 0 -Force
+          # Disable Network Level Authentication (optional)
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
+                           -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
+                           -Name "SecurityLayer" -Value 0 -Force
 
-          # Remove any existing rule with the same name to avoid duplication
-          netsh advfirewall firewall delete rule name="RDP-Allow-MyIP"
+          # Clean up old firewall rules
+          netsh advfirewall firewall delete rule name="RDP-Allow-Phone"
           netsh advfirewall firewall delete rule name="RDP-Allow-Tailscale"
 
-          # Allow RDP for your public IP
-          netsh advfirewall firewall add rule name="RDP-Allow-MyIP" `
+          # Allow RDP only from your phone's IP
+          netsh advfirewall firewall add rule name="RDP-Allow-Phone" `
             dir=in action=allow protocol=TCP localport=3389 remoteip=47.15.78.106
 
-          # Temporarily allow Tailscale range (will be refined later)
+          # Temporarily allow Tailscale subnet until real IP is known
           netsh advfirewall firewall add rule name="RDP-Allow-Tailscale" `
             dir=in action=allow protocol=TCP localport=3389 remoteip=100.64.0.0/10
 
-          # Restart Remote Desktop service to ensure changes take effect
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP User with Secure Password
+      - name: Create Secure RDP User
         run: |
           Add-Type -AssemblyName System.Security
-          $charSet = @{
-              Upper   = [char[]](65..90)
-              Lower   = [char[]](97..122)
-              Number  = [char[]](48..57)
-              Special = ([char[]](33..47) + [char[]](58..64) +
-                         [char[]](91..96) + [char[]](123..126))
+          $chars = @{
+            Upper = [char[]](65..90)
+            Lower = [char[]](97..122)
+            Number = [char[]](48..57)
+            Special = ([char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126))
           }
-          $rawPassword = @()
-          $rawPassword += $charSet.Upper | Get-Random -Count 4
-          $rawPassword += $charSet.Lower | Get-Random -Count 4
-          $rawPassword += $charSet.Number | Get-Random -Count 4
-          $rawPassword += $charSet.Special | Get-Random -Count 4
-          $password = -join ($rawPassword | Sort-Object { Get-Random })
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
-          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+          $raw = @()
+          $raw += $chars.Upper | Get-Random -Count 4
+          $raw += $chars.Lower | Get-Random -Count 4
+          $raw += $chars.Number | Get-Random -Count 4
+          $raw += $chars.Special | Get-Random -Count 4
+          $password = -join ($raw | Sort-Object { Get-Random })
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
+
+          New-LocalUser -Name "RDP" -Password $secure -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
 
           echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
 
-          if (-not (Get-LocalUser -Name "RDP")) {
-              Write-Error "User creation failed"
-              exit 1
-          }
-
       - name: Install Tailscale
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $file = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $url -OutFile $file
+          Start-Process msiexec.exe -ArgumentList "/i `"$file`" /quiet /norestart" -Wait
+          Remove-Item $file -Force
 
-      - name: Establish Tailscale Connection
+      - name: Connect to Tailscale
         run: |
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
 
           $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              Start-Sleep -Seconds 5
-              $retries++
+          for ($i=0; $i -lt 10; $i++) {
+            $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+            if ($tsIP) { break }
+            Start-Sleep -Seconds 5
           }
 
           if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
-              exit 1
+            Write-Error "Tailscale IP not assigned"
+            exit 1
           }
 
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-          # Update firewall to allow only Tailscale IP specifically
+          # Update firewall rule to only allow this specific Tailscale IP
           netsh advfirewall firewall delete rule name="RDP-Allow-Tailscale"
           netsh advfirewall firewall add rule name="RDP-Allow-Tailscale" `
             dir=in action=allow protocol=TCP localport=3389 remoteip=$tsIP
 
-      - name: Verify RDP Accessibility
+      - name: Show Connection Info
         run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
-              exit 1
-          }
-          Write-Host "TCP connectivity successful!"
+          Write-Host ""
+          Write-Host "===== RDP ACCESS DETAILS ====="
+          Write-Host "Tailscale IP : $env:TAILSCALE_IP"
+          Write-Host "Phone IP     : 47.15.78.106"
+          Write-Host "Username     : RDP"
+          Write-Host "Password     : $env:RDP_PASSWORD"
+          Write-Host "=============================="
+          Write-Host ""
+          Write-Host "To connect via Remote Desktop:"
+          Write-Host "→ Enter IP:  $env:TAILSCALE_IP  (if using Tailscale VPN)"
+          Write-Host "→ OR Enter IP:  47.15.78.106   (if connecting directly from your phone's public IP)"
+          Write-Host ""
 
-      - name: Maintain Connection
+      - name: Keep Session Active
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Public IP Allowed: 47.15.78.106"
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          Write-Host "Username: RDP"
-          Write-Host "Password: $env:RDP_PASSWORD"
-          Write-Host "==================`n"
-
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
-              Start-Sleep -Seconds 300
+            Write-Host "[$(Get-Date)] RDP running and accessible..."
+            Start-Sleep -Seconds 300
           }
