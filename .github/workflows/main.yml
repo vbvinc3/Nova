@@ -89,6 +89,8 @@ jobs:
           Write-Host ""
 
       - name: Keep Session Alive
+        env:
+          TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
         run: |
           $count = 0
           while ($true) {
@@ -96,12 +98,12 @@ jobs:
             $elapsed = $count * 5
             Write-Host "[$elapsed min] 🟢 Session active - Tunnel running"
             
-            # Check if cloudflared is still running
-            $process = Get-Process cloudflared -ErrorAction SilentlyContinue
+            # Check if cloudflared is still running (check all variations)
+            $process = Get-Process -Name "*cloudflared*" -ErrorAction SilentlyContinue
             if (-not $process) {
               Write-Host "⚠️ Cloudflared process not found! Attempting restart..."
               $exe = "$env:ProgramFiles\cloudflared\cloudflared.exe"
-              Start-Process -NoNewWindow -FilePath $exe -ArgumentList "tunnel", "--no-autoupdate", "run", "--token", "$env:TUNNEL_TOKEN"
+              Start-Process -NoNewWindow -FilePath $exe -ArgumentList "tunnel", "--no-autoupdate", "run", "--token=$env:TUNNEL_TOKEN"
               Start-Sleep -Seconds 10
             }
             
