@@ -29,9 +29,9 @@ jobs:
             Set-LocalUser -Name "RDPUser" -Password $securePass
           }
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDPUser" -ErrorAction SilentlyContinue
-          Write-Host "::add-mask::$password"
           echo "RDP_PASS=$password" >> $env:GITHUB_ENV
           Write-Host "✅ User Created: RDPUser"
+          Write-Host "🔑 Password: $password"
 
       - name: Install Cloudflared
         run: |
@@ -99,7 +99,7 @@ jobs:
             # Check if cloudflared is still running
             $process = Get-Process cloudflared -ErrorAction SilentlyContinue
             if (-not $process) {
-              Write-Error "❌ Cloudflared process died! Attempting restart..."
+              Write-Host "⚠️ Cloudflared process not found! Attempting restart..."
               $exe = "$env:ProgramFiles\cloudflared\cloudflared.exe"
               Start-Process -NoNewWindow -FilePath $exe -ArgumentList "tunnel", "--no-autoupdate", "run", "--token", "$env:TUNNEL_TOKEN"
               Start-Sleep -Seconds 10
