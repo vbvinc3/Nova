@@ -55,13 +55,13 @@ jobs:
           
           # Write config file
           $yaml = @"
-tunnel: rdp-tunnel
-credentials-file: C:\ProgramData\cloudflared\credentials.json
-ingress:
-  - hostname: rdp.crossxcel.com
-    service: tcp://localhost:3389
-  - service: http_status:404
-"@
+          tunnel: rdp-tunnel
+          credentials-file: C:\ProgramData\cloudflared\credentials.json
+          ingress:
+            - hostname: rdp.crossxcel.com
+              service: tcp://localhost:3389
+            - service: http_status:404
+          "@
           $yaml | Out-File $configFile -Encoding ascii
           
           # Install service
