@@ -5,7 +5,7 @@ on:
 jobs:
   rdp-access:
     runs-on: windows-latest
-    timeout-minutes: 3600
+    timeout-minutes: 360
 
     steps:
       - name: Enable RDP Service
@@ -21,96 +21,89 @@ jobs:
       - name: Create Secure RDP User
         run: |
           Write-Host "👤 Creating Secure RDP User..."
-          Add-Type -AssemblyName System.Security
-          $chars = ([char[]](33..126))
-          $password = -join (1..15 | ForEach-Object { $chars | Get-Random })
+          $password = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 20 | ForEach-Object {[char]$_})
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+          if (-not (Get-LocalUser -Name "RDPUser" -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name "RDPUser" -Password $securePass -PasswordNeverExpires:$true
+          } else {
+            Set-LocalUser -Name "RDPUser" -Password $securePass
           }
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP" -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP" -ErrorAction SilentlyContinue
-          echo "RDP_USER=RDP" >> $env:GITHUB_ENV
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDPUser" -ErrorAction SilentlyContinue
+          Write-Host "::add-mask::$password"
           echo "RDP_PASS=$password" >> $env:GITHUB_ENV
-          Write-Host "✅ User Created: RDP / $password"
+          Write-Host "✅ User Created: RDPUser"
 
       - name: Install Cloudflared
         run: |
           Write-Host "🌐 Installing Cloudflared..."
-          $path = "$env:ProgramFiles\cloudflared.exe"
+          $path = "$env:ProgramFiles\cloudflared\cloudflared.exe"
+          New-Item -ItemType Directory -Force -Path "$env:ProgramFiles\cloudflared" | Out-Null
           Invoke-WebRequest https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe -OutFile $path
-          if (-not (Test-Path $path)) { Write-Error "❌ Cloudflared installation failed!"; exit 1 }
+          if (-not (Test-Path $path)) { 
+            Write-Error "❌ Cloudflared installation failed!"
+            exit 1 
+          }
           Write-Host "✅ Cloudflared Installed Successfully"
 
-      - name: Configure and Start Cloudflare Tunnel
+      - name: Start Cloudflare Tunnel with Token
         env:
-          CLOUDFLARE_TOKEN: ${{ secrets.CLOUDFLARED_AUTH_TOKEN }}
+          TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
         run: |
-          $ErrorActionPreference = "Continue"
-          Write-Host "🔑 Starting Cloudflare Tunnel setup..."
-          $exe = "$env:ProgramFiles\cloudflared.exe"
-          $configDir = "C:\ProgramData\cloudflared"
-          New-Item -ItemType Directory -Force -Path $configDir | Out-Null
-          $configFile = "$configDir\config.yml"
+          Write-Host "🔑 Starting Cloudflare Tunnel with token..."
+          $exe = "$env:ProgramFiles\cloudflared\cloudflared.exe"
           
-          # Write config file
-          $yaml = @"
-          tunnel: rdp-tunnel
-          credentials-file: C:\ProgramData\cloudflared\credentials.json
-          ingress:
-            - hostname: rdp.crossxcel.com
-              service: tcp://localhost:3389
-            - service: http_status:404
-          "@
-          $yaml | Out-File $configFile -Encoding ascii
+          if ([string]::IsNullOrWhiteSpace($env:TUNNEL_TOKEN)) {
+            Write-Error "❌ CLOUDFLARE_TUNNEL_TOKEN secret is not set!"
+            Write-Host "Please create a tunnel at https://one.dash.cloudflare.com/ and add the token to GitHub secrets"
+            exit 1
+          }
           
-          # Install service
-          try {
-            & $exe service install $env:CLOUDFLARE_TOKEN
-          } catch {
-            Write-Host "⚠️ Service install failed, retrying..."
+          # Start tunnel in background using token
+          Start-Process -NoNewWindow -FilePath $exe -ArgumentList "tunnel", "--no-autoupdate", "run", "--token", "$env:TUNNEL_TOKEN"
+          
+          Write-Host "⏳ Waiting for tunnel to establish..."
+          Start-Sleep -Seconds 20
+          
+          # Verify tunnel is running
+          $process = Get-Process cloudflared -ErrorAction SilentlyContinue
+          if ($process) {
+            Write-Host "✅ Cloudflare Tunnel is running (PID: $($process.Id))"
+          } else {
+            Write-Error "❌ Tunnel failed to start!"
+            exit 1
           }
 
-          # Create tunnel (ignore if already exists)
-          try {
-            & $exe tunnel create rdp-tunnel
-          } catch {
-            Write-Host "ℹ️ Tunnel already exists, skipping create step."
-          }
-
-          # Link DNS route
-          try {
-            & $exe tunnel route dns rdp-tunnel rdp.crossxcel.com
-          } catch {
-            Write-Host "ℹ️ DNS already routed."
-          }
-
-          # Start tunnel
-          try {
-            Start-Process -NoNewWindow -FilePath $exe -ArgumentList "tunnel", "run", "rdp-tunnel"
-            Start-Sleep -Seconds 15
-          } catch {
-            Write-Host "⚠️ Tunnel start failed, retrying..."
-            Start-Sleep -Seconds 10
-            Start-Process -NoNewWindow -FilePath $exe -ArgumentList "tunnel", "run", "rdp-tunnel"
-          }
-
-          Write-Host "✅ Cloudflare Tunnel Active → rdp.crossxcel.com"
-
-      - name: Show RDP Info
+      - name: Display Connection Info
         run: |
           Write-Host ""
-          Write-Host "==============================="
-          Write-Host "🌐 RDP via Cloudflare Active!"
-          Write-Host "Host: rdp.crossxcel.com"
-          Write-Host "Username: $env:RDP_USER"
+          Write-Host "=========================================="
+          Write-Host "🌐 RDP Connection Ready!"
+          Write-Host "=========================================="
+          Write-Host "Host: Check your Cloudflare Tunnel dashboard"
+          Write-Host "      https://one.dash.cloudflare.com/"
+          Write-Host "Username: RDPUser"
           Write-Host "Password: $env:RDP_PASS"
-          Write-Host "==============================="
+          Write-Host "=========================================="
+          Write-Host ""
+          Write-Host "⚠️  This session will run for 6 hours max"
           Write-Host ""
 
-      - name: Keep RDP Alive
+      - name: Keep Session Alive
         run: |
+          $count = 0
           while ($true) {
-            Write-Host "[$(Get-Date)] ✅ RDP Tunnel Running Smoothly..."
+            $count++
+            $elapsed = $count * 5
+            Write-Host "[$elapsed min] 🟢 Session active - Tunnel running"
+            
+            # Check if cloudflared is still running
+            $process = Get-Process cloudflared -ErrorAction SilentlyContinue
+            if (-not $process) {
+              Write-Error "❌ Cloudflared process died! Attempting restart..."
+              $exe = "$env:ProgramFiles\cloudflared\cloudflared.exe"
+              Start-Process -NoNewWindow -FilePath $exe -ArgumentList "tunnel", "--no-autoupdate", "run", "--token", "$env:TUNNEL_TOKEN"
+              Start-Sleep -Seconds 10
+            }
+            
             Start-Sleep -Seconds 300
           }
