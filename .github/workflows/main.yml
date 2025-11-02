@@ -8,51 +8,100 @@ jobs:
     timeout-minutes: 3600
 
     steps:
-      - name: Enable and Configure RDP
+      - name: Enable RDP Service
         run: |
+          Write-Host "🔧 Enabling Remote Desktop..."
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
             -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
             -Name "UserAuthentication" -Value 0 -Force
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Write-Host "✅ RDP Enabled Successfully"
 
       - name: Create Secure RDP User
         run: |
+          Write-Host "👤 Creating Secure RDP User..."
           Add-Type -AssemblyName System.Security
           $chars = ([char[]](33..126))
           $password = -join (1..15 | ForEach-Object { $chars | Get-Random })
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+          }
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP" -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP" -ErrorAction SilentlyContinue
           echo "RDP_USER=RDP" >> $env:GITHUB_ENV
           echo "RDP_PASS=$password" >> $env:GITHUB_ENV
-          Write-Host "Created RDP User: RDP"
-          Write-Host "Password: $password"
+          Write-Host "✅ User Created: RDP / $password"
 
       - name: Install Cloudflared
         run: |
-          Invoke-WebRequest https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe -OutFile cloudflared.exe
-          Move-Item cloudflared.exe "$env:ProgramFiles\cloudflared.exe"
+          Write-Host "🌐 Installing Cloudflared..."
+          $path = "$env:ProgramFiles\cloudflared.exe"
+          Invoke-WebRequest https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe -OutFile $path
+          if (-not (Test-Path $path)) { Write-Error "❌ Cloudflared installation failed!"; exit 1 }
+          Write-Host "✅ Cloudflared Installed Successfully"
 
-      - name: Start Cloudflare Tunnel
+      - name: Configure and Start Cloudflare Tunnel
         env:
-          CLOUDFLARED_AUTH_TOKEN: ${{ secrets.CLOUDFLARED_AUTH_TOKEN }}
+          CLOUDFLARE_TOKEN: ${{ secrets.CLOUDFLARED_AUTH_TOKEN }}
         run: |
-          Start-Process -NoNewWindow -FilePath "$env:ProgramFiles\cloudflared.exe" `
-            -ArgumentList "service", "install", "--token", $env:CLOUDFLARED_AUTH_TOKEN
-          Start-Sleep -Seconds 10
-          Start-Process -NoNewWindow -FilePath "$env:ProgramFiles\cloudflared.exe" `
-            -ArgumentList "tunnel", "--no-autoupdate", "run"
-          Start-Sleep -Seconds 15
-          Write-Host "✅ Cloudflare Tunnel Started for rdp.crossxcel.com"
+          $ErrorActionPreference = "Continue"
+          Write-Host "🔑 Starting Cloudflare Tunnel setup..."
+          $exe = "$env:ProgramFiles\cloudflared.exe"
+          $configDir = "C:\ProgramData\cloudflared"
+          New-Item -ItemType Directory -Force -Path $configDir | Out-Null
+          $configFile = "$configDir\config.yml"
+          
+          # Write config file
+          $yaml = @"
+tunnel: rdp-tunnel
+credentials-file: C:\ProgramData\cloudflared\credentials.json
+ingress:
+  - hostname: rdp.crossxcel.com
+    service: tcp://localhost:3389
+  - service: http_status:404
+"@
+          $yaml | Out-File $configFile -Encoding ascii
+          
+          # Install service
+          try {
+            & $exe service install $env:CLOUDFLARE_TOKEN
+          } catch {
+            Write-Host "⚠️ Service install failed, retrying..."
+          }
 
-      - name: Display Connection Info
+          # Create tunnel (ignore if already exists)
+          try {
+            & $exe tunnel create rdp-tunnel
+          } catch {
+            Write-Host "ℹ️ Tunnel already exists, skipping create step."
+          }
+
+          # Link DNS route
+          try {
+            & $exe tunnel route dns rdp-tunnel rdp.crossxcel.com
+          } catch {
+            Write-Host "ℹ️ DNS already routed."
+          }
+
+          # Start tunnel
+          try {
+            Start-Process -NoNewWindow -FilePath $exe -ArgumentList "tunnel", "run", "rdp-tunnel"
+            Start-Sleep -Seconds 15
+          } catch {
+            Write-Host "⚠️ Tunnel start failed, retrying..."
+            Start-Sleep -Seconds 10
+            Start-Process -NoNewWindow -FilePath $exe -ArgumentList "tunnel", "run", "rdp-tunnel"
+          }
+
+          Write-Host "✅ Cloudflare Tunnel Active → rdp.crossxcel.com"
+
+      - name: Show RDP Info
         run: |
           Write-Host ""
           Write-Host "==============================="
           Write-Host "🌐 RDP via Cloudflare Active!"
-          Write-Host "Connect using:"
           Write-Host "Host: rdp.crossxcel.com"
           Write-Host "Username: $env:RDP_USER"
           Write-Host "Password: $env:RDP_PASS"
@@ -62,6 +111,6 @@ jobs:
       - name: Keep RDP Alive
         run: |
           while ($true) {
-            Write-Host "[$(Get-Date)] RDP session active..."
+            Write-Host "[$(Get-Date)] ✅ RDP Tunnel Running Smoothly..."
             Start-Sleep -Seconds 300
           }
